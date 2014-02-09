@@ -1,0 +1,258 @@
+Yii之执行流程
+=============
+@author AndyZhang<andyzhang@16nn.com>
+@since  2014-02-09 1.0.1
+@link   www.16nn.com
+=============
+
+查看文件的顺序：
+0 => string 'yii\demos\blog\index.php' (length=61)
+1 => string 'yii\framework\yii.php' (length=58)
+2 => string 'yii\framework\YiiBase.php' (length=62)
+3 => string 'yii\framework\base\interfaces.php' (length=70)
+4 => string 'yii\framework\web\CWebApplication.php' (length=74)
+5 => string 'yii\framework\base\CApplication.php' (length=72)
+6 => string 'yii\framework\base\CModule.php' (length=67)
+7 => string 'yii\framework\base\CComponent.php' (length=70)
+8 => string 'yii\demos\blog\protected\config\main.php' (length=77)
+9 => string 'yii\demos\blog\protected\config\params.php' (length=79)
+
+1）index.php 网站的唯一入口程序 
+<?php
+
+// change the following paths if necessary
+$yii=dirname(__FILE__).'/../../framework/yii.php';
+$config=dirname(__FILE__).'/protected/config/main.php';
+
+// remove the following line when in production mode
+// defined('YII_DEBUG') or define('YII_DEBUG',true);
+
+require_once($yii);
+Yii::createWebApplication($config)->run();
+?>
+
+上面的require_once($yii) 引用出了后面要用到的全局类Yii，Yii类是YiiBase类的完全继承：
+class Yii extends YiiBase  
+{  
+}
+
+系统的全局访问都是通过Yii类（即YiiBase类）来实现的，Yii类的成员和方法都是static类型。
+
+
+2）YiiBase.php 全局类 
+
+整个系统的执行就这句。（后面的调用有点复杂的）
+Yii::createWebApplication($config)->run();
+
+	1>createWebApplication() 
+		它执行了createApplication方法，其实是执行了CWebApplication对象实例，并传递$config给了它
+		return new CWebApplication($config);
+
+	2>spl_autoload_register(array('YiiBase','autoload'));
+
+		在YiiBase.php 文件结尾处:
+		spl_autoload_register(array('YiiBase','autoload'));
+		require(YII_PATH.'/base/interfaces.php');
+
+		这个是PHP5的类的自动加载。
+		spl_autoload_register方法将YiiBase中的静态方法autoload注册为了类的自动装载器。
+		PHP的autoload原理是，在试图加载没有定义的类时，会调用该方法autoload，并传递该类名给它。从而include相应类文件。
+
+		具体参照YiiBase.php中的autoload方法。
+
+		so,当return new CWebApplication($config); 时，就自动加载并执行了以下四个核心文件：
+			web\CWebApplication.php
+			base\CApplication.php
+			base\CModule.php
+			base\CComponent.php
+
+3）CWebApplication
+
+	1> 解析$config,并初始化系统
+
+		$config先被传递给CApplication的构造函数:(这里实现比较复杂)
+
+		<?php
+		public function __construct($config=null)
+		{
+			Yii::setApplication($this); //将自身的实例对象赋给Yii的静态成员$_app，以后可以通过 Yii::app() 来使用该对象。
+
+			// set basePath at early as possible to avoid trouble //设置CApplication 对象的_basePath ,指向 proteced 目录。
+			if(is_string($config))
+				$config=require($config);
+			if(isset($config['basePath']))
+			{
+				$this->setBasePath($config['basePath']);
+				unset($config['basePath']);
+			}
+			else
+				$this->setBasePath('protected');
+
+			//设置了两个系统路径别名 application 和 webroot，
+			//后面再import的时候可以用别名来代替实际的完整路径。别名配置存放在YiiBase的 $_aliases 数组中。
+			Yii::setPathOfAlias('application',$this->getBasePath());
+			Yii::setPathOfAlias('webroot',dirname($_SERVER['SCRIPT_FILENAME']));
+			if(isset($config['extensionPath']))
+			{
+				$this->setExtensionPath($config['extensionPath']);
+				unset($config['extensionPath']);
+			}
+			else
+				Yii::setPathOfAlias('ext',$this->getBasePath().DIRECTORY_SEPARATOR.'extensions');
+			if(isset($config['aliases']))
+			{
+				$this->setAliases($config['aliases']);
+				unset($config['aliases']);
+			}
+
+			$this->preinit();//预初始化。preinit()是在 CModule 类里定义的，空，没有任何动作。
+
+			$this->initSystemHandlers();//设置系统exception_handler和 error_handler，指向对象自身提供的两个方法。
+			$this->registerCoreComponents();//注册系统组件,具体参照该方法。
+
+			$this->configure($config);//解析并处理 $config 配置 
+			$this->attachBehaviors($this->behaviors);//空的，没动作
+			$this->preloadComponents();//预创建组件对象
+
+			$this->init();//空的，没动作
+		}
+		?>
+
+		1、$this->registerCoreComponents(); 注册核心组件
+
+		每个 Component 都是 IApplicationComponent接口的实例，Componemt的实例存放在$_components 数组里，
+		相关的配置信息存放在$_componentConfig数组里。配置信息包括Component 的类名和属性设置。
+
+		CWebApplication 对象注册了以下几个Component：
+			session, assetManager, user, themeManager, authManager, clientScript, widgetFactory。
+		CWebApplication的parent 注册了以下几个 Component：
+			coreMessages, db, messages, errorHandler, securityManager, statePersister, urlManager, request, format。
+
+		Component 在YiiPHP里是个非常重要的东西，它的特征是可以通过 CModule 的 __get() 和 __set() 方法来访问。 
+		Component 注册的时候并不会创建对象实例，而是在程序里被第一次访问到的时候，
+		由CModule 来负责（实际上就是 Yii::app()）创建.
+
+		2、$this->configure($config); 解析并处理 $config 配置 
+
+		configure() 在CModule 里。
+
+		<?php
+		public function configure($config)  
+		{  
+		   if(is_array($config))  
+		   {  
+		    foreach($config as $key=>$value)  
+		     $this->$key=$value;  
+		   }  
+		}
+		?>
+
+		实际上是把$config数组里的每一项传给 CModule 的 父类 CComponent __set() 方法:
+		if(method_exists($this,$setter))
+		根据这个条件，$config 数组里的basePath, params, modules, import, components 
+		都被传递给相应的 setBasePath(), setParams() 等方法里进行处理。
+
+		其中，
+		1）$config 数组里的 import 被传递给 CModule 的 setImport
+		<?php
+			public function setImport($aliases)  
+			{  
+			   foreach($aliases as $alias)  
+			    Yii::import($alias);  
+			}
+		?>
+
+		这里会通过Yii::import()方法来加载config中的import中定义的模块。具体参照YiiBase中的import方法。
+
+		2）$config 数组里的 $components 被传递给CModule 的setComponents($components)
+		<?php
+			public function setComponents($components)  
+			{  
+			   foreach($components as $id=>$component)  
+			   {  
+			    if($component instanceof IApplicationComponent)  //$componen是IApplicationComponen的实例的时候，直接赋值：
+			     $this->setComponent($id,$component);  
+			    else if(isset($this->_componentConfig[$id]))  
+			     $this->_componentConfig[$id]=CMap::mergeArray($this->_componentConfig[$id],$component);  
+			    else  
+			     $this->_componentConfig[$id]=$component;  
+			   }  
+			}
+		?>
+
+		如果$id已存在于_componentConfig[]中（前面注册的coreComponent）,将$component 属性加进入。
+		其他的component将component属性存入_componentConfig[]中。
+
+		3）$config 之 params 
+		<?php
+			public function setParams($value)  
+			{  
+			   $params=$this->getParams();  
+			   foreach($value as $k=>$v)  
+			    $params->add($k,$v);  
+			}
+		?>
+
+
+		3、$this->preloadComponents();
+		<?php 
+			protected function preloadComponents()
+			{
+				foreach($this->preload as $id)
+					$this->getComponent($id);
+			}
+		?>
+		这里加载了log组件,并include了以下文件：（/logging/CLogRouter.php:22: 'preload'=>array('log')）
+			logging\CLogRouter.php
+			base\CApplicationComponent.php
+			logging\CFileLogRoute.php
+			logging\CLogRoute.php
+			logging\CLogger.php
+			collections\CList.php
+
+	2> run()
+	这里才开始处理请求了。
+
+	<?php 
+		public function run()
+		{
+			if($this->hasEventHandler('onBeginRequest'))
+				$this->onBeginRequest(new CEvent($this));
+			register_shutdown_function(array($this,'end'),0,false);
+			$this->processRequest();
+			if($this->hasEventHandler('onEndRequest'))
+				$this->onEndRequest(new CEvent($this));
+		}
+	?>
+
+	$this->processRequest(); // 重点就它了，CWebApplication中。
+
+	<?php 
+	 	public function processRequest()
+		{
+			if(is_array($this->catchAllRequest) && isset($this->catchAllRequest[0]))
+			{
+				$route=$this->catchAllRequest[0];
+				foreach(array_splice($this->catchAllRequest,1) as $name=>$value)
+					$_GET[$name]=$value;
+			}
+			else
+				$route=$this->getUrlManager()->parseUrl($this->getRequest()); // 获取请求路由，如post/index
+			$this->runController($route); // 执行请求
+		}
+	?>
+
+	1、$route=$this->getUrlManager()->parseUrl($this->getRequest()); 
+	获取客户端请求路由，如example.com/yii/demos/blog/index.php/post/index
+	则请求路由为post/index
+
+	2、$this->runController($route);
+	这里实例化了请求的控制器，并执行了对应的方法：
+	$controller->init();
+	$controller->run($actionID);
+	其中init、run方法来自web/CController文件
+	
+至此，一次执行流程结束。
+注：代码例子为yii的demo blog.
+http://hsm.hz.blog.163.com/blog/static/10068801420134883422443/?latestBlog
+http://blog.csdn.net/wzllai/article/details/7658802
