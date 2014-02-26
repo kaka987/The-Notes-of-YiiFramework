@@ -1,0 +1,143 @@
+一、YiiBase.php中的代码赏析
+
+YiiBase.php可以说是Yii的核心类了，可以看出，在YiiBase中：
+设置了一些静态常量。
+包括所有的静态变量和静态方法。
+
+也就是说，它就是一个静态类，可以作为全局访问，这也是YiiBase类的独特之处。
+
+1、Yii的类的自动加载器方法autoload()
+
+就目前看，主流框架都会有自己的类自动加载器，使用spl_autoload_register方法（此为官网推荐使用，而不是__autoload）
+即自己实现自动加载器的具体方法，然后通过spl_autoload_register注册为自动加载器。
+
+下面看看Yii是如何实现自动加载的：
+<?php
+	/**
+	 * Class autoload loader. 
+	 * This method is provided to be invoked within an __autoload() magic method.
+	 * @param string $className class name
+	 * @return boolean whether the class has been loaded successfully
+	 */
+	public static function autoload($className) //__autoload()方法本身的参数$className
+	{
+		// use include so that the error PHP file may appear  //这里为什么统一使用include而非require和include_once等
+		if(isset(self::$classMap[$className])) //这里用的是静态数组变量，保存类名对应的类文件路径
+			include(self::$classMap[$className]);
+		elseif(isset(self::$_coreClasses[$className])) //这里放的是框架核心类=>类路径的数组
+			include(YII_PATH.self::$_coreClasses[$className]);
+		else
+		{
+			// include class file relying on include_path
+			if(strpos($className,'\\')===false)  // class without namespace 这里是当调用一个没有使用命名空间的类时
+			{
+				if(self::$enableIncludePath===false)
+				{
+					foreach(self::$_includePaths as $path)
+					{
+						$classFile=$path.DIRECTORY_SEPARATOR.$className.'.php';
+						if(is_file($classFile)) // 我们一般会使用file_exists(判断文件或目录是否存在)，而is_file是判断文件存在且为正常的文件。
+						{
+							include($classFile); // 如果文件存在就加载它 //relpath格式化路径的，basename获取文件部分
+							if(YII_DEBUG && basename(realpath($classFile))!==$className.'.php') //文件存在，但类名和组装的文件不匹配时
+								throw new CException(Yii::t('yii','Class name "{class}" does not match class file "{file}".', array(
+									'{class}'=>$className,
+									'{file}'=>$classFile,//Yii的异常处理是基于PHP内置异常的一个很好的扩展
+								)));
+							break; //发现这个有点多余呢？
+						}
+					}
+				}
+				else
+					include($className.'.php');
+			}
+			else  // class name with namespace in PHP 5.3
+			{     //这里由于历史原因，Yii在PHP没有命名空间时，是用.来作为所谓的命名空间分隔符的，所以这里会替换为.
+				$namespace=str_replace('\\','.',ltrim($className,'\\')); 
+				if(($path=self::getPathOfAlias($namespace))!==false)
+					include($path.'.php');
+				else
+					return false;
+			}
+			return class_exists($className,false) || interface_exists($className,false);
+		}
+		return true;
+	}
+
+?>
+
+整体看，逻辑层次很清晰：
+1) $classMap 		先搜索该数组资源
+2) $_coreClasses 	在搜索核心资源
+3) IncludePath 		再根据是否设置了IncludePath，来尝试搜索资源
+4) return true 		如果没有搜索到，则返回true
+
+看点：
+1) self::$classMap
+静态数组的使用，静态变量是所有类实例共享的属性。以引用方式调用。
+尤其在单例类中用的比较多。可以作为全局使用，这样就替代了全局变量的作用。
+
+2) include
+区别于require的致命性报错
+
+3) if(strpos($className,'\\')===false) 
+strpos(),用来在字符串中搜索指定字符。包括===的使用
+
+4) return class_exists($className,false) || interface_exists($className,false);
+
+return 的特殊使用，可以加表达式
+
+5) registerAutoloader($callback, $append=false) 注册自动加载器的方法
+
+这里说明，你可以实现自己的autoloader类加载器了，就是扩展Yii的类加载器（人家随时都在考虑着扩展）
+
+
+2、Yii的类的调用方法import()
+
+加载一个类(include class.php)或者一个类包(include_path=classdir)，知道java的，立马会想到java中的import引用包的方式了。
+这里包括立即加载(直接引入类文件),延迟加载(只是扔进一个全局可访问数组,使用时再加载)
+
+1) import($alias,$forceInclude=false)
+	$alias参数，即需要调用的类名
+	$forceInclude，是否立即加载，or延迟加载
+
+2) 主要就以下两块：
+	self::$_imports[$alias]=$alias; 	//这里是保存alias=>classname的对应关系
+	self::$classMap[$alias]=$classFile; //此数组保存classname=>classpath的对应关系
+
+3、log()方法
+
+log方法之所以放在这里，就是考虑它的全局可访问性，这个类就是全局静态类。
+这是一个很好的单例模式的例子了。
+
+log的具体实现参照CLogger类
+
+<?php
+public static function log($msg,$level=CLogger::LEVEL_INFO,$category='application')
+	{
+		if(self::$_logger===null)
+			self::$_logger=new CLogger; //实现单例模式，将对象保存在一个静态变量中。
+		if(YII_DEBUG && YII_TRACE_LEVEL>0 && $level!==CLogger::LEVEL_PROFILE)
+		{
+			$traces=debug_backtrace(); //回朔函数，返回追踪的一个数组，调试很有用的一个函数了
+			$count=0;
+			foreach($traces as $trace)
+			{
+				if(isset($trace['file'],$trace['line']) && strpos($trace['file'],YII_PATH)!==0)
+				{
+					$msg.="\nin ".$trace['file'].' ('.$trace['line'].')';
+					if(++$count>=YII_TRACE_LEVEL)
+						break;
+				}
+			}
+		}
+		self::$_logger->log($msg,$level,$category);
+	}
+?>
+
+4、$_coreClasses静态变量
+
+这个数组保存了Yii的核心类及其对应的类的路径。
+
+我的理解是，这里相当于我们在注册服务，将服务和服务路径注册进一个全局可访问的数组中，在需要使用时，直接调用。
+当然，这里也是个很好的扩展Yii核心的入口。
