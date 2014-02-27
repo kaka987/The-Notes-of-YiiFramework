@@ -1,0 +1,110 @@
+三、CBaseController的代码和结构设计赏析
+
+CBaseController
+CController
+Controller
+PostController
+
+When a user requests an action 'XYZ', CController will do one of the following:
+1. Method-based action: call method 'actionXYZ' if it exists;
+2. Class-based action: create an instance of class 'XYZ' if the class is found in the action class map
+    (specified via {@link actions()}, and execute the action;
+3. Call {@link missingAction()}, which by default will raise a 404 HTTP exception.
+
+再一次感觉到Yii框架的注释太详细了。
+
+
+1、CBaseController（具体参照注释）
+	
+	CBaseController是控制器和挂件的基类，主要提供了视图渲染，挂件，剪辑、片段缓存等方法
+
+	CClipWidget Clips : a clip is a piece of captured output that can be inserted elsewhere.
+	CWidget Widgets : a widget is a self-contained sub-controller with its own view and model.
+	COutputCache Fragment cache : fragment cache selectively caches a portion of the output.
+
+	1）private $_widgetStack=array(); //组件栈
+		这就是一个基于系统思维的开发者写法，使用栈可以实现组件的多层嵌套，
+		这也是Yii组件机制的优势。
+
+	2）
+
+2、CController
+
+	CController是所有应用中自定义控制器的基类。
+
+控制器的调用从CWebApplication执行runController()起，
+通过路由找到控制器和动作id，include控制器类对应的文件，再初始化控制器实例，然后执行$controller->run($actionID)，
+通过actionId创建动作对象(预留beforeControllerAction和afterControllerAction钩子)。
+
+
+如果动作方法存在于控制器中并且不是actions()，会创建一个CInlineAction对象，
+否则通过actions()中会返回外部动作的关联数组射找到外部动作对象，这个好处是可以共用一些同样的动作。
+
+CInlineAction,就是指这个控制器中的方法。这个对象继承与web/actions/CAction类，包括真正的run方法。
+
+
+
+过滤器
+在创建完Action对象后，现在又返回到CController接着执行过滤动作(预留beforeControllerAction和afterControllerAction钩子)，
+此时会加载过滤器，控制器通过CController::filters()方法返回过滤器配置关联数组，和验证器相似，
+过滤器可以在控制器内部定义(方法名必须以filter开头)也可以自定义过滤器类继承CFilter扩展preFilter()和postFilter()方法, 
+如框架中自带的授权验证CAccessControlFilter。
+
+
+<?php 
+public function run($actionID) //CController中的run方法
+{
+	if(($action=$this->createAction($actionID))!==null) //new CInlineAction($this,$actionID); 
+	{													//OR createActionFromMap($this->actions(),$actionID,$actionID);
+		if(($parent=$this->getModule())===null)
+			$parent=Yii::app();
+		if($parent->beforeControllerAction($this,$action)) //执行方法前行为
+		{
+			$this->runActionWithFilters($action,$this->filters()); //执行对应的控制器方法
+			$parent->afterControllerAction($this,$action); //执行控制器方法后行为
+		}
+	}
+	else
+		$this->missingAction($actionID);//没有方法，抛出异常
+}
+
+?>
+
+
+我的理解：
+基本的运行流程如下，
+1、根据路由确定对应的控制器和方法
+2、执行对应控制器方法前的钩子
+3、根据需要运行具体的Filters
+4、传递参数，并运行对应的方法（如果没有对应的actionXyz方法，就会在actions中寻找对应方法）
+5、执行对应控制器方法后的钩子
+6、抛出异常
+
+这里的基本执行流程和其他框架没有多少差别，
+最有特点的就是这里的actions了，
+我的理解，它就类似于面向对象的切面编程，它会去直接调用该控制器外的某个类中的同名方法。
+这样显然提高了类或模块间的代码重用了。
+
+'create' => array(  
+        'class'      => 'application.actions.CreateAction',  
+        'modelClass' => 'Post',  
+    ),  
+
+'page'=>array(  
+        'class'=>'CViewAction',  
+        'basePath' => '$path',  
+        'defaultView '=> '$view'  
+    ),  
+
+<?php
+public function runWithParams($params)
+{
+	$methodName='action'.$this->getId(); //方法（这里用ID，意味着动作在控制器中就是唯一的标识）
+	$controller=$this->getController();  //控制器对象
+	$method=new ReflectionMethod($controller, $methodName); //这里用反射来获取方法的参数数目
+	if($method->getNumberOfParameters()>0)
+		return $this->runWithParamsInternal($controller, $method, $params);
+	else
+		return $controller->$methodName();
+}
+?>
